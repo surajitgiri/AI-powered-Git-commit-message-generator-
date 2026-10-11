@@ -1,0 +1,19 @@
+# Binaries
+commitgen.exe
+commitgen
+*.exe
+*.test
+*.out
+
+# Go
+vendor/
+
+# Env / secrets
+.env
+.env.*
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
