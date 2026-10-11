@@ -4,6 +4,7 @@ commitgen
 *.exe
 *.test
 *.out
+* text=auto
 
 # Go
 vendor/
