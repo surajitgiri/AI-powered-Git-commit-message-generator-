@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
@@ -29,13 +30,15 @@ type ollamaResponse struct {
 	Error    string `json:"error"`
 }
 
-func getStageDiff() (string, error) {
-	check := exec.Command("git", "rev-parse", "--is-inside-work-tree")
-	if err := check.Run(); err != nil {
-		return "", fmt.Errorf("not a git repository")
-	}
+// Files that add noise but no useful signal for a commit message.
+var excludes = []string{
+	":(exclude)*.lock",
+	":(exclude)package-lock.json",
+	":(exclude)go.sum",
+}
 
-	cmd := exec.Command("git", "diff", "--staged")
+func runGit(args ...string) (string, error) {
+	cmd := exec.Command("git", args...)
 	var out, stderr bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &stderr
@@ -43,8 +46,30 @@ func getStageDiff() (string, error) {
 	if err := cmd.Run(); err != nil {
 		return "", fmt.Errorf("git error: %v: %s", err, stderr.String())
 	}
-
 	return strings.TrimSpace(out.String()), nil
+}
+
+func getStageDiff() (string, error) {
+	check := exec.Command("git", "rev-parse", "--is-inside-work-tree")
+	if err := check.Run(); err != nil {
+		return "", fmt.Errorf("not a git repository")
+	}
+
+	pathspec := append([]string{"--", "."}, excludes...)
+
+	stat, err := runGit(append([]string{"diff", "--staged", "--stat"}, pathspec...)...)
+	if err != nil {
+		return "", err
+	}
+	diff, err := runGit(append([]string{"diff", "--staged"}, pathspec...)...)
+	if err != nil {
+		return "", err
+	}
+	if diff == "" {
+		return "", nil
+	}
+
+	return "Summary:\n" + stat + "\n\nChanges:\n" + diff, nil
 }
 
 func buildPrompt(diff string) string {
@@ -53,13 +78,16 @@ func buildPrompt(diff string) string {
 	}
 
 	return `You are an expert at writing Git commit messages.
-Write ONE commit message for the diff below using the Conventional Commits format.
+Write ONE commit message for the changes below using the Conventional Commits format.
+
 Rules:
 - First line: type(scope): short summary, max 72 characters, imperative mood
 - Types: feat, fix, docs, style, refactor, test, chore
 - Optionally add a blank line and 1-3 short bullet points
+- Base the message ONLY on the lines starting with + or -
 - Output ONLY the commit message, no explanations, no code fences
-Diff:` + diff
+
+` + diff
 }
 
 func generateMessage(diff string) (string, error) {
@@ -82,7 +110,6 @@ func generateMessage(diff string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("cannot reach Ollama (is it running?): %v", err)
 	}
-
 	defer resp.Body.Close()
 
 	raw, err := io.ReadAll(resp.Body)
@@ -94,16 +121,20 @@ func generateMessage(diff string) (string, error) {
 	if err := json.Unmarshal(raw, &result); err != nil {
 		return "", fmt.Errorf("bad response from Ollama: %s", string(raw))
 	}
-
 	if result.Error != "" {
-		return "", fmt.Errorf("ollama error:%s", result.Error)
+		return "", fmt.Errorf("ollama error: %s", result.Error)
 	}
 
 	msg := strings.TrimSpace(result.Response)
 	msg = strings.Trim(msg, "`")
-
 	return strings.TrimSpace(msg), nil
+}
 
+func commit(msg string) error {
+	cmd := exec.Command("git", "commit", "-m", msg)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
 }
 
 func main() {
@@ -112,19 +143,34 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-
 	if diff == "" {
 		fmt.Fprintln(os.Stderr, "No staged changes. Run 'git add' first.")
 		os.Exit(1)
 	}
 
-	fmt.Fprintln(os.Stderr, "Generating commit message...")
-	msg, err := generateMessage(diff)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
+	reader := bufio.NewReader(os.Stdin)
+	for {
+		fmt.Fprintln(os.Stderr, "Generating commit message...")
+		msg, err := generateMessage(diff)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
 
-	fmt.Println()
-	fmt.Println(msg)
+		fmt.Printf("\n%s\n\n[y] commit  [r] regenerate  [q] quit: ", msg)
+		ans, _ := reader.ReadString('\n')
+
+		switch strings.ToLower(strings.TrimSpace(ans)) {
+		case "y":
+			if err := commit(msg); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+			return
+		case "r":
+			continue
+		default:
+			return
+		}
+	}
 }

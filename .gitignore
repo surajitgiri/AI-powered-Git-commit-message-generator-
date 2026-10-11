@@ -1,10 +1,9 @@
-# Binaries
+﻿# Binaries
 commitgen.exe
 commitgen
 *.exe
 *.test
 *.out
-* text=auto
 
 # Go
 vendor/
